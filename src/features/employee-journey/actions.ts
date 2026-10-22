@@ -4,18 +4,12 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireRole } from "@/features/auth/session";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool, sql } from "@/lib/db/sqlserver";
 
 const activityIdSchema = z.string().uuid();
 
-async function getEmployeeClient() {
-  await requireRole("employee");
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) redirect("/login?setup=required");
-  return supabase;
-}
-
 export async function completeJourneyActivity(formData: FormData) {
+  const profile = await requireRole("employee");
   const activityId = activityIdSchema.safeParse(formData.get("activity_id"));
   if (!activityId.success) redirect("/roadmap?error=invalid");
 
@@ -25,18 +19,28 @@ export async function completeJourneyActivity(formData: FormData) {
       ? { confirmed: formData.get("confirmed") === "on" }
       : { acknowledged: formData.get("acknowledged") === "on" };
 
-  const supabase = await getEmployeeClient();
-  const { error } = await supabase.rpc("complete_journey_activity", {
-    p_activity_id: activityId.data,
-    p_payload: payload,
-  });
-  if (error) redirect("/roadmap?error=complete");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("ActivityId", sql.UniqueIdentifier, activityId.data);
+    req.input("ActorId", sql.UniqueIdentifier, profile.id);
+    req.input("PayloadJson", sql.NVarChar(sql.MAX), JSON.stringify(payload));
+    req.output("Completed", sql.Bit);
+    req.output("Score", sql.Numeric(5, 4));
+    req.output("Passed", sql.Bit);
+
+    await req.execute("app.sp_CompleteJourneyActivity");
+  } catch (err) {
+    console.error("Lỗi hoàn thành nhiệm vụ SQL Server:", err);
+    redirect("/roadmap?error=complete");
+  }
 
   revalidatePath("/roadmap");
   redirect("/roadmap?result=completed");
 }
 
 export async function submitJourneyActivity(formData: FormData) {
+  const profile = await requireRole("employee");
   const activityId = activityIdSchema.safeParse(formData.get("activity_id"));
   if (!activityId.success) redirect("/roadmap?error=invalid");
 
@@ -66,15 +70,25 @@ export async function submitJourneyActivity(formData: FormData) {
     redirect("/roadmap?error=invalid");
   }
 
-  const supabase = await getEmployeeClient();
-  const { data, error } = await supabase.rpc("complete_journey_activity", {
-    p_activity_id: activityId.data,
-    p_payload: payload,
-  });
-  if (error) redirect("/roadmap?error=answer");
+  let completed = false;
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("ActivityId", sql.UniqueIdentifier, activityId.data);
+    req.input("ActorId", sql.UniqueIdentifier, profile.id);
+    req.input("PayloadJson", sql.NVarChar(sql.MAX), JSON.stringify(payload));
+    req.output("Completed", sql.Bit);
+    req.output("Score", sql.Numeric(5, 4));
+    req.output("Passed", sql.Bit);
+
+    const result = await req.execute("app.sp_CompleteJourneyActivity");
+    completed = Boolean(result.output.Completed);
+  } catch (err) {
+    console.error("Lỗi nộp bài kiểm tra SQL Server:", err);
+    redirect("/roadmap?error=answer");
+  }
 
   revalidatePath("/roadmap");
-  const result = data as { completed?: boolean } | null;
-  if (result?.completed === false) redirect("/roadmap?result=retry");
+  if (!completed) redirect("/roadmap?result=retry");
   redirect("/roadmap?result=completed");
 }

@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireRole } from "@/features/auth/session";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool, sql } from "@/lib/db/sqlserver";
 
 const feedbackSchema = z.object({
   category: z.enum(["roadmap", "content", "navigation", "accessibility", "other"]),
@@ -18,16 +18,21 @@ export async function submitUxFeedback(formData: FormData) {
   });
   if (!parsed.success) redirect("/profile?feedback=invalid");
 
-  await requireRole("employee");
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) redirect("/login?setup=required");
+  const profile = await requireRole("employee");
 
-  const { error } = await supabase.rpc("submit_ux_feedback", {
-    p_category: parsed.data.category,
-    p_message: parsed.data.message,
-    p_page_path: "/profile",
-  });
-  if (error) redirect("/profile?feedback=error");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("Category", sql.NVarChar(40), parsed.data.category);
+    req.input("Message", sql.NVarChar(2000), parsed.data.message);
+    req.input("PagePath", sql.NVarChar(260), "/profile");
+    req.input("ActorId", sql.UniqueIdentifier, profile.id);
+
+    await req.execute("app.sp_SubmitUxFeedback");
+  } catch (err) {
+    console.error("Lỗi gửi phản hồi UX SQL Server:", err);
+    redirect("/profile?feedback=error");
+  }
 
   revalidatePath("/profile");
   redirect("/profile?feedback=sent");

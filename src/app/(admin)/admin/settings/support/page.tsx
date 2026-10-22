@@ -1,6 +1,6 @@
 import { archiveSupportContact, saveSupportContact } from "@/features/admin-operations/actions";
 import { requireRole } from "@/features/auth/session";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool } from "@/lib/db/sqlserver";
 
 type Contact = {
   id: string;
@@ -20,16 +20,20 @@ function ContactForm({ contact }: { contact?: Contact }) {
   return (
     <form action={saveSupportContact} className="form-grid">
       {contact && <input name="id" type="hidden" value={contact.id} />}
-      <label className="field"><span>Tên hiển thị</span><input defaultValue={contact?.display_name} maxLength={120} name="display_name" required /></label>
-      <label className="field"><span>Vai trò hỗ trợ</span><input defaultValue={contact?.support_role} maxLength={120} name="support_role" required /></label>
-      <label className="field"><span>Phạm vi</span><select defaultValue={contact?.scope_type ?? "company"} name="scope_type">
-        <option value="company">Toàn công ty</option><option value="office">Văn phòng</option><option value="department">Phòng ban</option><option value="position">Chức danh</option><option value="group">Nhóm</option><option value="employee">Nhân viên</option>
+      <label className="field"><span>Họ & Tên đầu mối hỗ trợ</span><input defaultValue={contact?.display_name} maxLength={120} name="display_name" required placeholder="Ví dụ: Nguyễn Thị Loan" /></label>
+      <label className="field"><span>Vai trò hỗ trợ</span><input defaultValue={contact?.support_role} maxLength={120} name="support_role" required placeholder="Ví dụ: Cán bộ Nhân sự phụ trách Hội nhập" /></label>
+      <label className="field"><span>Phạm vi áp dụng</span><select defaultValue={contact?.scope_type ?? "company"} name="scope_type">
+        <option value="company">Toàn công ty</option><option value="office">Theo văn phòng</option><option value="department">Theo phòng ban</option><option value="position">Theo chức danh</option><option value="group">Theo nhóm</option><option value="employee">Cá nhân nhân viên</option>
       </select></label>
-      <label className="field"><span>Giá trị phạm vi (để trống nếu toàn công ty)</span><input defaultValue={contact?.scope_value ?? ""} maxLength={160} name="scope_value" /></label>
-      <label className="field"><span>Email</span><input defaultValue={contact?.contact_email ?? ""} maxLength={320} name="contact_email" type="email" /></label>
-      <label className="field"><span>Điện thoại</span><input defaultValue={contact?.contact_phone ?? ""} maxLength={80} name="contact_phone" /></label>
-      <label className="field form-wide"><span>URL hỗ trợ (HTTPS/HTTP)</span><input defaultValue={contact?.contact_url ?? ""} maxLength={1000} name="contact_url" type="url" /></label>
-      <button className="form-wide" type="submit">{contact ? "Lưu thay đổi" : "Thêm liên hệ"}</button>
+      <label className="field"><span>Giá trị phạm vi (để trống nếu toàn công ty)</span><input defaultValue={contact?.scope_value ?? ""} maxLength={160} name="scope_value" placeholder="Ví dụ: HQ Hanoi hoặc Logistics" /></label>
+      <label className="field"><span>Email liên hệ</span><input defaultValue={contact?.contact_email ?? ""} maxLength={320} name="contact_email" type="email" placeholder="hr.support@bee-logistics.com" /></label>
+      <label className="field"><span>Số điện thoại</span><input defaultValue={contact?.contact_phone ?? ""} maxLength={80} name="contact_phone" placeholder="024 3822 xxxx" /></label>
+      <label className="field form-wide"><span>Đường dẫn hỗ trợ (URL / Ticket link)</span><input defaultValue={contact?.contact_url ?? ""} maxLength={1000} name="contact_url" type="url" placeholder="https://support.bee-logistics.com" /></label>
+      <div className="form-wide" style={{ marginTop: "0.5rem" }}>
+        <button className="btn btn-primary" type="submit">
+          {contact ? "Lưu thay đổi liên hệ ➔" : "+ Thêm liên hệ mới vào danh bạ"}
+        </button>
+      </div>
     </form>
   );
 }
@@ -37,36 +41,91 @@ function ContactForm({ contact }: { contact?: Contact }) {
 export default async function SupportDirectoryPage({ searchParams }: Props) {
   await requireRole("hr_admin");
   const params = await searchParams;
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return <p className="notice">Cần cấu hình Supabase để quản lý danh bạ.</p>;
+  const pool = await getSqlPool();
 
-  const { data, error } = await supabase
-    .from("support_contacts")
-    .select("id, display_name, support_role, scope_type, scope_value, contact_email, contact_phone, contact_url, is_active")
-    .eq("is_active", true)
-    .order("is_active", { ascending: false })
-    .order("display_name");
-  if (error) throw new Error("Không tải được danh bạ hỗ trợ.");
-  const contacts = (data ?? []) as Contact[];
+  const result = await pool.request().query(`
+    SELECT 
+      Id AS id, 
+      DisplayName AS display_name, 
+      SupportRole AS support_role, 
+      ScopeType AS scope_type, 
+      ScopeValue AS scope_value, 
+      ContactEmail AS contact_email, 
+      ContactPhone AS contact_phone, 
+      ContactUrl AS contact_url, 
+      IsActive AS is_active
+    FROM app.SupportContacts
+    WHERE IsActive = 1
+    ORDER BY DisplayName ASC
+  `);
+
+  const contacts = result.recordset.map((c) => ({
+    ...c,
+    id: String(c.id),
+    is_active: Boolean(c.is_active),
+  })) as Contact[];
 
   return (
-    <section className="stack">
-      <header className="card stack">
-        <h2>Danh bạ hỗ trợ</h2>
-        <p className="muted">Nhân viên chỉ đọc liên hệ đang hoạt động trong phạm vi hồ sơ của mình. Dữ liệu danh bạ do HR nhập.</p>
-        {params.saved && <p role="status">Đã lưu liên hệ.</p>}
-        {params.archived && <p role="status">Đã ngừng hiển thị liên hệ.</p>}
-        {params.error && <p className="error-text" role="alert">Không lưu được liên hệ. Kiểm tra phạm vi và thông tin liên lạc.</p>}
+    <div className="stack" style={{ gap: "2rem" }}>
+      <header className="card stack" style={{ gap: "0.75rem" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+          <span className="badge badge-primary">Cấu Hình Doanh Nghiệp</span>
+          <span className="badge badge-accent">Danh Bạ Hỗ Trợ</span>
+        </div>
+        <h1 style={{ fontSize: "1.75rem", margin: 0 }}>Quản Lý Danh Bạ Đầu Mối Hỗ Trợ</h1>
+        <p className="muted" style={{ margin: 0 }}>
+          Nhân viên mới sẽ nhìn thấy các đầu mối hỗ trợ tương ứng với văn phòng và phòng ban trong hồ sơ của mình.
+        </p>
+        {params.saved && (
+          <div className="notice notice-success" role="status">
+            ✓ Đã lưu thông tin đầu mối hỗ trợ thành công.
+          </div>
+        )}
+        {params.archived && (
+          <div className="notice" role="status">
+            Đã ngừng hiển thị đầu mối liên hệ.
+          </div>
+        )}
+        {params.error && (
+          <div className="notice notice-danger" role="alert">
+            ⚠️ Không lưu được liên hệ. Vui lòng kiểm tra lại phạm vi và thông tin liên lạc.
+          </div>
+        )}
       </header>
-      <article className="card stack"><h3>Thêm liên hệ</h3><ContactForm /></article>
+
+      <article className="card stack" style={{ gap: "1.25rem" }}>
+        <h2 style={{ fontSize: "1.25rem", color: "var(--color-primary)", margin: 0 }}>
+          ➕ Thêm Đầu Mối Liên Hệ Mới
+        </h2>
+        <ContactForm />
+      </article>
+
       {contacts.map((contact) => (
-        <article className="card stack" key={contact.id}>
-          <div className="portal-header"><div><h3>{contact.display_name}</h3><p className="muted">{contact.scope_type === "company" ? "Toàn công ty" : `${contact.scope_type}: ${contact.scope_value}`} · {contact.is_active ? "Đang hoạt động" : "Đã lưu trữ"}</p></div>
-            {contact.is_active && <form action={archiveSupportContact}><input name="id" type="hidden" value={contact.id} /><button type="submit">Ngừng hiển thị</button></form>}
+        <article className="card stack" key={contact.id} style={{ gap: "1.25rem" }}>
+          <div className="flex-between" style={{ flexWrap: "wrap", gap: "1rem", borderBottom: "1px solid var(--color-border-subtle)", paddingBottom: "0.85rem" }}>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.25rem" }}>
+                <span className="badge badge-accent">{contact.support_role}</span>
+                <span className="badge badge-primary">
+                  {contact.scope_type === "company" ? "Toàn công ty" : `${contact.scope_type}: ${contact.scope_value}`}
+                </span>
+              </div>
+              <h3 style={{ fontSize: "1.2rem", margin: 0, color: "var(--color-text-main)" }}>
+                {contact.display_name}
+              </h3>
+            </div>
+            {contact.is_active && (
+              <form action={archiveSupportContact}>
+                <input name="id" type="hidden" value={contact.id} />
+                <button type="submit" className="btn btn-secondary" style={{ minHeight: "34px", padding: "0.3rem 0.85rem", fontSize: "0.82rem" }}>
+                  Ngừng hiển thị ✕
+                </button>
+              </form>
+            )}
           </div>
           <ContactForm contact={contact} />
         </article>
       ))}
-    </section>
+    </div>
   );
 }

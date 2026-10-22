@@ -10,28 +10,23 @@
     "build": "node ./node_modules/next/dist/bin/next build",
     "start": "node ./node_modules/next/dist/bin/next start",
     "lint": "node ./node_modules/eslint/bin/eslint.js",
-    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit",
-    "test": "node ./node_modules/vitest/vitest.mjs run",
-    "test:watch": "node ./node_modules/vitest/vitest.mjs",
-    "supabase": "node ./node_modules/supabase/dist/supabase.js"
+    "typecheck": "node ./node_modules/typescript/bin/tsc --noEmit"
   },
   "dependencies": {
-    "@supabase/ssr": "^0.12.7",
-    "@supabase/supabase-js": "^2.118.0",
+    "@types/mssql": "^12.3.0",
+    "msnodesqlv8": "^5.6.0",
+    "mssql": "^12.7.11",
     "next": "16.4.2",
     "react": "19.3.0",
     "react-dom": "19.3.0",
     "zod": "^4.6.7"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "^0.5.11",
     "@types/node": "^24.19.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
-    "supabase": "2.121.0",
-    "typescript": "^5",
-    "vitest": "^5.0.5"
+    "typescript": "^5"
   }
 }

@@ -1,5 +1,7 @@
 import type { NextConfig } from "next";
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  serverExternalPackages: ["msnodesqlv8", "mssql"],
+};
 
 export default nextConfig;

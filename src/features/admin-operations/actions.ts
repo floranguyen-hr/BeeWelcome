@@ -2,7 +2,8 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requireAdminActionClient } from "@/features/auth/admin-action";
+import { requireRole } from "@/features/auth/session";
+import { getSqlPool, sql } from "@/lib/db/sqlserver";
 import {
   assignJourneySchema,
   manageActivitySchema,
@@ -10,6 +11,8 @@ import {
 } from "@/features/admin-operations/schemas";
 
 export async function assignJourney(formData: FormData) {
+  const admin = await requireRole("hr_admin");
+
   const parsed = assignJourneySchema.safeParse({
     employee_id: formData.get("employee_id"),
     template_id: formData.get("template_id"),
@@ -17,13 +20,20 @@ export async function assignJourney(formData: FormData) {
   });
   if (!parsed.success) redirect("/admin/employees?error=invalid");
 
-  const { supabase } = await requireAdminActionClient();
-  const { error } = await supabase.rpc("assign_template_to_employee", {
-    p_template_id: parsed.data.template_id,
-    p_employee_id: parsed.data.employee_id,
-    p_start_date: parsed.data.start_date,
-  });
-  if (error) redirect("/admin/employees?error=assignment");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("TemplateId", sql.UniqueIdentifier, parsed.data.template_id);
+    req.input("EmployeeId", sql.UniqueIdentifier, parsed.data.employee_id);
+    req.input("StartDate", sql.Date, parsed.data.start_date);
+    req.input("ActorId", sql.UniqueIdentifier, admin.id);
+    req.output("JourneyId", sql.UniqueIdentifier);
+
+    await req.execute("app.sp_AssignTemplateToEmployee");
+  } catch (err) {
+    console.error("Lỗi gán hành trình SQL Server:", err);
+    redirect("/admin/employees?error=assignment");
+  }
 
   revalidatePath("/admin/employees");
   revalidatePath("/admin/dashboard");
@@ -31,6 +41,8 @@ export async function assignJourney(formData: FormData) {
 }
 
 export async function manageJourneyActivity(formData: FormData) {
+  const admin = await requireRole("hr_admin");
+
   const parsed = manageActivitySchema.safeParse({
     activity_id: formData.get("activity_id"),
     action: formData.get("action"),
@@ -38,13 +50,19 @@ export async function manageJourneyActivity(formData: FormData) {
   });
   if (!parsed.success) redirect("/admin/progress?error=invalid");
 
-  const { supabase } = await requireAdminActionClient();
-  const { error } = await supabase.rpc("manage_journey_activity", {
-    p_activity_id: parsed.data.activity_id,
-    p_action: parsed.data.action,
-    p_note: parsed.data.note,
-  });
-  if (error) redirect("/admin/progress?error=update");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("ActivityId", sql.UniqueIdentifier, parsed.data.activity_id);
+    req.input("Action", sql.NVarChar(20), parsed.data.action);
+    req.input("Note", sql.NVarChar(500), parsed.data.note);
+    req.input("ActorId", sql.UniqueIdentifier, admin.id);
+
+    await req.execute("app.sp_ManageJourneyActivity");
+  } catch (err) {
+    console.error("Lỗi cập nhật tiến độ SQL Server:", err);
+    redirect("/admin/progress?error=update");
+  }
 
   revalidatePath("/admin/progress");
   revalidatePath("/admin/dashboard");
@@ -53,6 +71,8 @@ export async function manageJourneyActivity(formData: FormData) {
 }
 
 export async function saveSupportContact(formData: FormData) {
+  const admin = await requireRole("hr_admin");
+
   const parsed = supportContactSchema.safeParse({
     id: formData.get("id") || undefined,
     display_name: formData.get("display_name"),
@@ -65,21 +85,29 @@ export async function saveSupportContact(formData: FormData) {
   });
   if (!parsed.success) redirect("/admin/settings/support?error=invalid");
 
-  const { supabase } = await requireAdminActionClient();
-  const { error } = await supabase.rpc("upsert_support_contact", {
-    p_contact_id: parsed.data.id ?? null,
-    p_payload: {
-      display_name: parsed.data.display_name,
-      support_role: parsed.data.support_role,
-      scope_type: parsed.data.scope_type,
-      scope_value:
-        parsed.data.scope_type === "company" ? null : parsed.data.scope_value,
-      contact_email: parsed.data.contact_email,
-      contact_phone: parsed.data.contact_phone,
-      contact_url: parsed.data.contact_url,
-    },
-  });
-  if (error) redirect("/admin/settings/support?error=save");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("ContactId", sql.UniqueIdentifier, parsed.data.id || null);
+    req.input("DisplayName", sql.NVarChar(120), parsed.data.display_name);
+    req.input("SupportRole", sql.NVarChar(120), parsed.data.support_role);
+    req.input("ScopeType", sql.NVarChar(30), parsed.data.scope_type);
+    req.input(
+      "ScopeValue",
+      sql.NVarChar(160),
+      parsed.data.scope_type === "company" ? null : parsed.data.scope_value,
+    );
+    req.input("ContactEmail", sql.NVarChar(320), parsed.data.contact_email || null);
+    req.input("ContactPhone", sql.NVarChar(80), parsed.data.contact_phone || null);
+    req.input("ContactUrl", sql.NVarChar(1000), parsed.data.contact_url || null);
+    req.input("ActorId", sql.UniqueIdentifier, admin.id);
+    req.output("ResultContactId", sql.UniqueIdentifier);
+
+    await req.execute("app.sp_UpsertSupportContact");
+  } catch (err) {
+    console.error("Lỗi lưu liên hệ hỗ trợ SQL Server:", err);
+    redirect("/admin/settings/support?error=save");
+  }
 
   revalidatePath("/admin/settings/support");
   revalidatePath("/support");
@@ -87,16 +115,24 @@ export async function saveSupportContact(formData: FormData) {
 }
 
 export async function archiveSupportContact(formData: FormData) {
+  const admin = await requireRole("hr_admin");
+
   const id = formData.get("id");
   if (typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id)) {
     redirect("/admin/settings/support?error=invalid");
   }
 
-  const { supabase } = await requireAdminActionClient();
-  const { error } = await supabase.rpc("archive_support_contact", {
-    p_contact_id: id,
-  });
-  if (error) redirect("/admin/settings/support?error=archive");
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    req.input("ContactId", sql.UniqueIdentifier, id);
+    req.input("ActorId", sql.UniqueIdentifier, admin.id);
+
+    await req.execute("app.sp_ArchiveSupportContact");
+  } catch (err) {
+    console.error("Lỗi lưu trữ liên hệ SQL Server:", err);
+    redirect("/admin/settings/support?error=archive");
+  }
 
   revalidatePath("/admin/settings/support");
   revalidatePath("/support");

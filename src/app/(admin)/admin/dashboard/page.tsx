@@ -1,40 +1,74 @@
 import Link from "next/link";
 import { requireRole } from "@/features/auth/session";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool } from "@/lib/db/sqlserver";
 
 export default async function AdminDashboardPage() {
   await requireRole("hr_admin");
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) return <p className="notice">Cần cấu hình Supabase để tải dashboard.</p>;
+  const pool = await getSqlPool();
 
-  const { data: journeys, error: journeyError } = await supabase
-    .from("employee_journeys")
-    .select("id, employee_id, title_snapshot, status, start_date, assigned_at")
-    .order("assigned_at", { ascending: false })
-    .limit(100);
-  if (journeyError) throw new Error("Không tải được dữ liệu dashboard.");
+  const [journeysRes, profilesRes, activitiesRes, feedbackRes] = await Promise.all([
+    pool.request().query(`
+      SELECT 
+        Id AS id, 
+        EmployeeId AS employee_id, 
+        TitleSnapshot AS title_snapshot, 
+        Status AS status, 
+        CONVERT(NVARCHAR(10), StartDate, 23) AS start_date, 
+        AssignedAt AS assigned_at
+      FROM app.EmployeeJourneys
+      ORDER BY AssignedAt DESC
+    `),
+    pool.request().query(`
+      SELECT Id AS id, DisplayName AS display_name, Email AS email
+      FROM app.Profiles
+    `),
+    pool.request().query(`
+      SELECT 
+        Id AS id, 
+        JourneyId AS journey_id, 
+        TitleSnapshot AS title_snapshot, 
+        IncludeInProgress AS include_in_progress, 
+        Status AS status, 
+        CONVERT(NVARCHAR(10), AvailableAt, 23) AS available_at, 
+        CONVERT(NVARCHAR(10), DueAt, 23) AS due_at
+      FROM app.JourneyActivities
+    `),
+    pool.request().query(`
+      SELECT TOP 5 
+        Id AS id, 
+        EmployeeId AS employee_id, 
+        Category AS category, 
+        Message AS message, 
+        SubmittedAt AS submitted_at
+      FROM app.UxFeedback
+      ORDER BY SubmittedAt DESC
+    `),
+  ]);
 
-  const journeyIds = (journeys ?? []).map((journey) => journey.id);
-  const [profileResult, activityResult, feedbackResult] = journeyIds.length
-    ? await Promise.all([
-        supabase.from("profiles").select("id, display_name, email"),
-        supabase
-          .from("journey_activities")
-          .select("id, journey_id, title_snapshot, include_in_progress, status, available_at, due_at")
-          .in("journey_id", journeyIds),
-        supabase.from("ux_feedback").select("id, employee_id, category, message, submitted_at").order("submitted_at", { ascending: false }).limit(5),
-      ])
-    : [
-        { data: [], error: null },
-        { data: [], error: null },
-        await supabase.from("ux_feedback").select("id, employee_id, category, message, submitted_at").order("submitted_at", { ascending: false }).limit(5),
-      ];
-  if (profileResult.error || activityResult.error || feedbackResult.error) {
-    throw new Error("Không tải được tiến độ hoặc phản hồi.");
-  }
+  const journeys = journeysRes.recordset.map((j) => ({
+    ...j,
+    id: String(j.id),
+    employee_id: String(j.employee_id),
+  }));
 
-  const profileMap = new Map((profileResult.data ?? []).map((profile) => [profile.id, profile]));
-  const activities = activityResult.data ?? [];
+  const profileMap = new Map(
+    profilesRes.recordset.map((p) => [String(p.id), { id: String(p.id), display_name: p.display_name, email: p.email }]),
+  );
+
+  const activities = activitiesRes.recordset.map((a) => ({
+    ...a,
+    id: String(a.id),
+    journey_id: String(a.journey_id),
+    include_in_progress: Boolean(a.include_in_progress),
+  }));
+
+  const feedbacks = feedbackRes.recordset.map((f) => ({
+    id: String(f.id),
+    employee_id: String(f.employee_id),
+    category: String(f.category),
+    message: String(f.message),
+    submitted_at: f.submitted_at,
+  }));
   const today = new Date().toISOString().slice(0, 10);
   const activeCount = (journeys ?? []).filter((journey) => journey.status === "active").length;
   const overdueCount = activities.filter((activity) =>
@@ -43,55 +77,197 @@ export default async function AdminDashboardPage() {
   const employeeCount = new Set((journeys ?? []).map((journey) => journey.employee_id)).size;
 
   return (
-    <section className="stack">
-      <header className="card stack">
-        <div className="portal-header">
+    <div className="stack" style={{ gap: "2rem" }}>
+      {/* Top Metric Section */}
+      <section className="stack" style={{ gap: "1.25rem" }}>
+        <div className="flex-between" style={{ flexWrap: "wrap", gap: "1rem" }}>
           <div>
-            <h2>Dashboard</h2>
-            <p className="muted">Tổng quan tối đa 100 hành trình gần nhất.</p>
+            <div style={{ display: "flex", alignItems: "center", gap: "0.5rem", marginBottom: "0.35rem" }}>
+              <span className="badge badge-primary">Trung Tâm Điều Hành HR</span>
+              <span className="badge badge-accent">SQL Server Active</span>
+            </div>
+            <h1 style={{ fontSize: "1.85rem", color: "var(--color-text-main)", margin: 0 }}>
+              Bảng Điều Khiển Onboarding
+            </h1>
+            <p className="muted" style={{ fontSize: "0.92rem", marginTop: "0.25rem" }}>
+              Theo dõi trực quan tiến độ hội nhập, chất lượng đào tạo và phản hồi từ nhân viên mới.
+            </p>
           </div>
-          <Link href="/admin/progress">Mở quản lý tiến độ</Link>
-        </div>
-        <div className="summary-grid">
-          <article className="inset-card"><strong>{employeeCount}</strong><p>Nhân viên có hành trình</p></article>
-          <article className="inset-card"><strong>{activeCount}</strong><p>Hành trình đang hoạt động</p></article>
-          <article className="inset-card"><strong>{overdueCount}</strong><p>Hoạt động quá hạn</p></article>
-          <article className="inset-card"><strong>{(journeys ?? []).length}</strong><p>Hành trình gần nhất</p></article>
-        </div>
-      </header>
 
-      <article className="card stack">
-        <div className="portal-header"><h3>Hành trình gần đây</h3><Link href="/admin/employees">Giao hành trình</Link></div>
-        {(journeys ?? []).length === 0 ? <p>Chưa có hành trình được giao.</p> : (
-          <div className="table-scroll"><table>
-            <thead><tr><th>Nhân viên</th><th>Hành trình</th><th>Trạng thái</th><th>Hoạt động</th><th>Tiến độ</th></tr></thead>
-            <tbody>{(journeys ?? []).slice(0, 20).map((journey) => {
-              const employee = profileMap.get(journey.employee_id);
-              const counted = activities.filter((activity) => activity.journey_id === journey.id && activity.include_in_progress && activity.available_at <= today && activity.status !== "removed");
-              const complete = counted.filter((activity) => ["completed", "waived"].includes(activity.status)).length;
-              const progress = counted.length ? Math.round((complete / counted.length) * 100) : 0;
-              return <tr key={journey.id}>
-                <td>{employee?.display_name ?? "Không rõ"}<br /><span className="muted">{employee?.email}</span></td>
-                <td>{journey.title_snapshot}<br /><span className="muted">Bắt đầu {journey.start_date}</span></td>
-                <td>{journey.status}</td>
-                <td>{complete}/{counted.length}</td>
-                <td><progress aria-label={`Tiến độ ${employee?.display_name ?? "nhân viên"}`} max={100} value={progress} /> {progress}%</td>
-              </tr>;
-            })}</tbody>
-          </table></div>
+          <Link href="/admin/progress" className="btn btn-primary">
+            Quản Lý Chi Tiết Tiến Độ ➔
+          </Link>
+        </div>
+
+        {/* 4 Thẻ KPI Bento Tinh Tế */}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1.25rem" }}>
+          <div className="card card-interactive" style={{ borderLeft: "4px solid var(--color-primary)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 700 }}>NHÂN VIÊN ONBOARDING</span>
+              <span style={{ fontSize: "1.25rem" }}>👥</span>
+            </div>
+            <div style={{ fontSize: "2.25rem", fontWeight: 800, color: "var(--color-primary)", margin: "0.35rem 0" }} className="tabular-numbers">
+              {employeeCount}
+            </div>
+            <span className="muted" style={{ fontSize: "0.78rem" }}>Đã được phân bổ lộ trình</span>
+          </div>
+
+          <div className="card card-interactive" style={{ borderLeft: "4px solid var(--status-success)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 700 }}>HÀNH TRÌNH ĐANG CHẠY</span>
+              <span style={{ fontSize: "1.25rem" }}>🚀</span>
+            </div>
+            <div style={{ fontSize: "2.25rem", fontWeight: 800, color: "var(--status-success)", margin: "0.35rem 0" }} className="tabular-numbers">
+              {activeCount}
+            </div>
+            <span className="muted" style={{ fontSize: "0.78rem" }}>Đang trong tiến trình học tập</span>
+          </div>
+
+          <div className="card card-interactive" style={{ borderLeft: "4px solid var(--status-danger)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 700 }}>NHIỆM VỤ QUÁ HẠN</span>
+              <span style={{ fontSize: "1.25rem" }}>⚠️</span>
+            </div>
+            <div style={{ fontSize: "2.25rem", fontWeight: 800, color: overdueCount > 0 ? "var(--status-danger)" : "var(--color-text-main)", margin: "0.35rem 0" }} className="tabular-numbers">
+              {overdueCount}
+            </div>
+            <span className="muted" style={{ fontSize: "0.78rem" }}>Cần nhắc nhở nhân sự</span>
+          </div>
+
+          <div className="card card-interactive" style={{ borderLeft: "4px solid var(--color-accent-dark)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span className="muted" style={{ fontSize: "0.85rem", fontWeight: 700 }}>TỔNG SỐ LỘ TRÌNH</span>
+              <span style={{ fontSize: "1.25rem" }}>📋</span>
+            </div>
+            <div style={{ fontSize: "2.25rem", fontWeight: 800, color: "var(--color-accent-dark)", margin: "0.35rem 0" }} className="tabular-numbers">
+              {(journeys ?? []).length}
+            </div>
+            <span className="muted" style={{ fontSize: "0.78rem" }}>Hành trình lưu vết toàn hệ thống</span>
+          </div>
+        </div>
+      </section>
+
+      {/* Bảng Tiến Độ Nhân Viên Gần Đây */}
+      <section className="card stack" style={{ gap: "1.25rem" }}>
+        <div className="flex-between" style={{ flexWrap: "wrap", gap: "1rem" }}>
+          <div>
+            <h2 style={{ fontSize: "1.35rem", color: "var(--color-text-main)", margin: 0 }}>
+              Tiến Độ Nhân Viên Gần Đây
+            </h2>
+            <p className="muted" style={{ fontSize: "0.85rem", marginTop: "0.25rem" }}>
+              Danh sách 20 hành trình onboarding gần nhất
+            </p>
+          </div>
+          <Link href="/admin/employees" className="btn btn-secondary">
+            + Gán lộ trình mới
+          </Link>
+        </div>
+
+        {(journeys ?? []).length === 0 ? (
+          <div className="inset-card" style={{ textAlign: "center", padding: "3rem" }}>
+            <p className="muted">Chưa có hành trình nào được giao cho nhân viên.</p>
+          </div>
+        ) : (
+          <div className="table-responsive">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Nhân Viên</th>
+                  <th>Lộ Trình</th>
+                  <th>Trạng Thái</th>
+                  <th>Nhiệm Vụ</th>
+                  <th>Tiến Độ Hoàn Thành</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(journeys ?? []).slice(0, 20).map((journey) => {
+                  const employee = profileMap.get(journey.employee_id);
+                  const counted = activities.filter(
+                    (activity) => activity.journey_id === journey.id && activity.include_in_progress && activity.available_at <= today && activity.status !== "removed",
+                  );
+                  const complete = counted.filter((activity) => ["completed", "waived"].includes(activity.status)).length;
+                  const progress = counted.length ? Math.round((complete / counted.length) * 100) : 0;
+
+                  return (
+                    <tr key={journey.id}>
+                      <td>
+                        <strong style={{ display: "block", color: "var(--color-text-main)" }}>
+                          {employee?.display_name ?? "Không rõ"}
+                        </strong>
+                        <span className="muted" style={{ fontSize: "0.78rem" }}>{employee?.email}</span>
+                      </td>
+
+                      <td>
+                        <span style={{ fontWeight: 600 }}>{journey.title_snapshot}</span>
+                        <span className="muted" style={{ display: "block", fontSize: "0.78rem" }}>Bắt đầu: {journey.start_date}</span>
+                      </td>
+
+                      <td>
+                        <span className={`badge ${journey.status === "active" ? "badge-primary" : "badge-success"}`}>
+                          {journey.status}
+                        </span>
+                      </td>
+
+                      <td style={{ fontWeight: 700 }} className="tabular-numbers">
+                        {complete} / {counted.length}
+                      </td>
+
+                      <td style={{ minWidth: "180px" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                          <div style={{ flex: 1, height: "8px", backgroundColor: "var(--color-bg-subtle)", borderRadius: "9999px", overflow: "hidden" }}>
+                            <div
+                              style={{
+                                width: `${progress}%`,
+                                height: "100%",
+                                backgroundColor: progress === 100 ? "var(--status-success)" : "var(--color-primary)",
+                                borderRadius: "9999px",
+                              }}
+                            />
+                          </div>
+                          <strong className="tabular-numbers" style={{ fontSize: "0.88rem", width: "42px", textAlign: "right" }}>
+                            {progress}%
+                          </strong>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
         )}
-      </article>
+      </section>
 
-      <article className="card stack">
-        <h3>Phản hồi sản phẩm mới nhất</h3>
-        {(feedbackResult.data ?? []).length === 0 ? <p>Chưa có phản hồi.</p> : (feedbackResult.data ?? []).map((feedback) => (
-          <div className="inset-card" key={feedback.id}>
-            <p><strong>{feedback.category}</strong> · {profileMap.get(feedback.employee_id)?.display_name ?? "Nhân viên"} · {new Date(feedback.submitted_at).toLocaleDateString("vi-VN")}</p>
-            <p>{feedback.message}</p>
+      {/* Phản Hồi Mới Nhất Từ Nhân Viên */}
+      <section className="card stack" style={{ gap: "1rem" }}>
+        <h3 style={{ fontSize: "1.25rem", color: "var(--color-text-main)", margin: 0 }}>
+          💬 Phản Hồi Trải Nghiệm Mới Nhất
+        </h3>
+        {feedbacks.length === 0 ? (
+          <p className="muted" style={{ padding: "1rem 0" }}>Chưa có phản hồi mới nào từ nhân sự.</p>
+        ) : (
+          <div className="stack" style={{ gap: "0.75rem" }}>
+            {feedbacks.map((feedback) => (
+              <div key={feedback.id} className="inset-card">
+                <div className="flex-between" style={{ marginBottom: "0.4rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
+                    <span className="badge badge-accent">{feedback.category}</span>
+                    <strong style={{ fontSize: "0.92rem" }}>
+                      {profileMap.get(feedback.employee_id)?.display_name ?? "Nhân viên"}
+                    </strong>
+                  </div>
+                  <span className="muted" style={{ fontSize: "0.78rem" }}>
+                    {new Date(feedback.submitted_at).toLocaleDateString("vi-VN")}
+                  </span>
+                </div>
+                <p style={{ fontSize: "0.92rem", color: "var(--color-text-muted)", margin: 0, lineHeight: 1.5 }}>
+                  {feedback.message}
+                </p>
+              </div>
+            ))}
           </div>
-        ))}
-      </article>
-      <p className="notice">Prototype chỉ sử dụng tài khoản và dữ liệu giả lập. Dashboard chỉ đọc 100 hành trình gần nhất.</p>
-    </section>
+        )}
+      </section>
+    </div>
   );
 }

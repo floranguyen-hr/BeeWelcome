@@ -5,7 +5,7 @@ import {
 } from "@/features/content-library/actions";
 import { ArchiveContentButton } from "@/features/content-library/archive-button";
 import { requireRole } from "@/features/auth/session";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool, sql } from "@/lib/db/sqlserver";
 
 type SearchParams = {
   q?: string;
@@ -49,72 +49,103 @@ export async function ContentLibraryPage({
 }) {
   await requireRole("hr_admin");
   const params = await searchParams;
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) {
-    return <p className="notice">Cần cấu hình Supabase để tải thư viện.</p>;
-  }
 
-  let contentsQuery = supabase
-    .from("contents")
-    .select(
-      "id, slug, title, description, category, content_type, scope_type, scope_value, status, current_version, created_at",
-    )
-    .order("created_at", { ascending: false });
-  if (params.q) {
-    contentsQuery = contentsQuery.ilike("title", "%" + params.q + "%");
-  }
-  if (
-    params.status &&
-    ["draft", "published", "archived"].includes(params.status)
-  ) {
-    contentsQuery = contentsQuery.eq("status", params.status);
-  }
-  if (
-    params.type &&
-    ["text", "image", "video", "file_link", "task", "quiz_form"].includes(
-      params.type,
-    )
-  ) {
-    contentsQuery = contentsQuery.eq("content_type", params.type);
-  }
+  let contents: Array<any> = [];
+  let versionList: Array<any> = [];
+  let usageList: Array<any> = [];
+  let privateConfigs: Array<any> = [];
 
-  const { data: contents, error } = await contentsQuery;
-  if (error) {
-    throw new Error("Không tải được Content Library.");
-  }
+  try {
+    const pool = await getSqlPool();
+    const req = pool.request();
+    let whereClauses: string[] = [];
 
-  const ids = (contents ?? []).map((content) => content.id);
-  const { data: versions, error: versionsError } = ids.length
-    ? await supabase
-        .from("content_versions")
-        .select(
-          "content_id, version_number, body, version_status, change_note, published_at",
-        )
-        .in("content_id", ids)
-        .order("version_number", { ascending: false })
-    : { data: [], error: null };
-  if (versionsError) {
-    throw new Error("Không tải được lịch sử phiên bản nội dung.");
-  }
+    if (params.q) {
+      req.input("keyword", sql.NVarChar(100), `%${params.q.trim()}%`);
+      whereClauses.push("Title LIKE @keyword");
+    }
+    if (params.status && ["draft", "published", "archived"].includes(params.status)) {
+      req.input("status", sql.NVarChar(20), params.status);
+      whereClauses.push("Status = @status");
+    }
+    if (params.type && ["text", "image", "video", "file_link", "task", "quiz_form"].includes(params.type)) {
+      req.input("contentType", sql.NVarChar(30), params.type);
+      whereClauses.push("ContentType = @contentType");
+    }
 
-  const usageQuery = ids.length
-    ? await supabase
-        .from("template_items")
-        .select("content_id")
-        .in("content_id", ids)
-    : null;
-  const privateConfigQuery = ids.length
-    ? await supabase
-        .from("content_private_configs")
-        .select("content_id, version_number, answer_config")
-        .in("content_id", ids)
-    : null;
-  if (privateConfigQuery?.error) {
-    throw new Error("Không tải được cấu hình nội dung bảo mật.");
+    const whereSql = whereClauses.length > 0 ? "WHERE " + whereClauses.join(" AND ") : "";
+
+    const [cRes, vRes, uRes, pRes] = await Promise.all([
+      req.query(`
+        SELECT 
+          Id AS id, 
+          Slug AS slug, 
+          Title AS title, 
+          Description AS description, 
+          Category AS category, 
+          ContentType AS content_type, 
+          ScopeType AS scope_type, 
+          ScopeValue AS scope_value, 
+          Status AS status, 
+          CurrentVersion AS current_version, 
+          CONVERT(NVARCHAR(30), CreatedAt, 126) AS created_at
+        FROM app.Contents
+        ${whereSql}
+        ORDER BY CreatedAt DESC
+      `),
+      pool.request().query(`
+        SELECT 
+          ContentId AS content_id, 
+          VersionNumber AS version_number, 
+          Body AS body_raw, 
+          VersionStatus AS version_status, 
+          ChangeNote AS change_note, 
+          CONVERT(NVARCHAR(30), PublishedAt, 126) AS published_at
+        FROM app.ContentVersions
+        ORDER BY VersionNumber DESC
+      `),
+      pool.request().query(`
+        SELECT DISTINCT ContentId AS content_id FROM app.TemplateItems
+      `),
+      pool.request().query(`
+        SELECT 
+          ContentId AS content_id, 
+          VersionNumber AS version_number, 
+          AnswerConfig AS answer_config_raw
+        FROM app.ContentPrivateConfigs
+      `),
+    ]);
+
+    contents = cRes.recordset.map((c) => ({ ...c, id: String(c.id) }));
+    versionList = vRes.recordset.map((v) => ({
+      content_id: String(v.content_id),
+      version_number: v.version_number,
+      version_status: v.version_status,
+      change_note: v.change_note,
+      published_at: v.published_at,
+      body: (() => {
+        try {
+          return typeof v.body_raw === "string" ? JSON.parse(v.body_raw) : v.body_raw || {};
+        } catch {
+          return {};
+        }
+      })(),
+    }));
+    usageList = uRes.recordset.map((u) => ({ content_id: String(u.content_id) }));
+    privateConfigs = pRes.recordset.map((p) => ({
+      content_id: String(p.content_id),
+      version_number: p.version_number,
+      answer_config: (() => {
+        try {
+          return typeof p.answer_config_raw === "string" ? JSON.parse(p.answer_config_raw) : p.answer_config_raw || {};
+        } catch {
+          return {};
+        }
+      })(),
+    }));
+  } catch (sqlErr) {
+    console.error("SQL Server ContentLibrary error:", sqlErr);
   }
-  const versionList = versions ?? [];
-  const usageList = usageQuery?.data ?? [];
-  const privateConfigs = privateConfigQuery?.data ?? [];
 
   return (
     <section className="stack">

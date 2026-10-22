@@ -15,7 +15,7 @@ import {
   updateTemplateMilestone,
 } from "@/features/template-builder/actions";
 import { ArchiveTemplateButton } from "@/features/template-builder/archive-template-button";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { getSqlPool, sql } from "@/lib/db/sqlserver";
 
 type SearchParams = {
   error?: string;
@@ -59,58 +59,130 @@ export async function TemplateDetailPage({
   searchParams: Promise<SearchParams>;
 }) {
   const params = await searchParams;
-  const supabase = await createSupabaseServerClient();
-  if (!supabase) {
-    return <p className="notice">Cần cấu hình Supabase để tải template.</p>;
+  const pool = await getSqlPool();
+
+  const templateRes = await pool
+    .request()
+    .input("templateId", sql.UniqueIdentifier, templateId)
+    .query(`
+      SELECT 
+        Id AS id, 
+        Slug AS slug, 
+        Name AS name, 
+        Description AS description, 
+        ScopeType AS scope_type, 
+        ScopeValue AS scope_value, 
+        Status AS status, 
+        VersionNumber AS version_number, 
+        CONVERT(NVARCHAR(30), UpdatedAt, 126) AS updated_at
+      FROM app.Templates
+      WHERE Id = @templateId
+    `);
+
+  const rawTpl = templateRes.recordset[0];
+  if (!rawTpl) notFound();
+
+  const template = {
+    ...rawTpl,
+    id: String(rawTpl.id),
+    version_number: Number(rawTpl.version_number) || 1,
+  };
+
+  let updatePreviews: JourneyUpdatePreview[] = [];
+  if (template.status === "published") {
+    try {
+      const prevReq = pool.request();
+      prevReq.input("TemplateId", sql.UniqueIdentifier, template.id);
+      const prevRes = await prevReq.execute("app.sp_PreviewTemplateJourneyUpdates");
+      updatePreviews = (prevRes.recordset ?? []).map((p: any) => ({
+        journey_id: String(p.JourneyId || p.journey_id || ""),
+        employee_id: String(p.EmployeeId || p.employee_id || ""),
+        employee_name: String(p.EmployeeName || p.employee_name || ""),
+        from_version: Number(p.FromVersion || p.from_version) || 1,
+        to_version: Number(p.ToVersion || p.to_version) || template.version_number,
+        added_count: Number(p.AddedCount || p.added_count || p.PendingInsertCount || 0),
+        updated_count: Number(p.UpdatedCount || p.updated_count || p.PendingUpdateCount || 0),
+        removed_count: Number(p.RemovedCount || p.removed_count || p.PendingWaiveCount || 0),
+        preserved_count: Number(p.PreservedCount || p.preserved_count || p.CompletedRetainCount || 0),
+        eligible: Boolean(p.Eligible ?? true),
+        reason: p.Reason || p.reason || null,
+      }));
+    } catch (prevErr) {
+      console.warn("Lỗi preview template updates:", prevErr);
+    }
   }
 
-  const { data: template, error: templateError } = await supabase
-    .from("templates")
-    .select("*")
-    .eq("id", templateId)
-    .maybeSingle();
-  if (templateError) throw new Error("Không tải được template.");
-  if (!template) notFound();
+  const milestonesRes = await pool
+    .request()
+    .input("templateId", sql.UniqueIdentifier, templateId)
+    .query(`
+      SELECT 
+        Id AS id, 
+        Name AS name, 
+        Sequence AS sequence, 
+        AvailableOffsetDays AS available_offset_days, 
+        IsActive AS is_active
+      FROM app.Milestones
+      WHERE TemplateId = @templateId
+      ORDER BY Sequence ASC
+    `);
 
-  const previewQuery = template.status === "published"
-    ? await supabase.rpc("preview_template_journey_updates", {
-        p_template_id: template.id,
-      })
-    : { data: [], error: null };
-  if (previewQuery.error) {
-    throw new Error("Không tải được bản xem trước thay đổi template.");
-  }
-  const updatePreviews = (previewQuery.data ?? []) as JourneyUpdatePreview[];
+  const milestoneList = milestonesRes.recordset.map((m: any) => ({
+    id: String(m.id),
+    name: String(m.name),
+    sequence: Number(m.sequence),
+    available_offset_days: Number(m.available_offset_days),
+    is_active: Boolean(m.is_active),
+  }));
 
-  const { data: milestones, error: milestoneError } = await supabase
-    .from("milestones")
-    .select("id, name, sequence, available_offset_days, is_active")
-    .eq("template_id", templateId)
-    .order("sequence");
-  if (milestoneError) throw new Error("Không tải được milestone.");
+  const itemsRes = await pool
+    .request()
+    .input("templateId", sql.UniqueIdentifier, templateId)
+    .query(`
+      SELECT 
+        ti.Id AS id, 
+        ti.MilestoneId AS milestone_id, 
+        ti.ContentId AS content_id, 
+        ti.Sequence AS sequence, 
+        ti.IsRequired AS is_required, 
+        ti.AvailableOffsetDays AS available_offset_days, 
+        ti.DueOffsetDays AS due_offset_days, 
+        ti.CompletionRule AS completion_rule, 
+        ti.IncludeInProgress AS include_in_progress, 
+        ti.IsActive AS is_active
+      FROM app.TemplateItems ti
+      INNER JOIN app.Milestones m ON ti.MilestoneId = m.Id
+      WHERE m.TemplateId = @templateId
+      ORDER BY ti.Sequence ASC
+    `);
 
-  const milestoneIds = (milestones ?? []).map((milestone) => milestone.id);
-  const { data: items, error: itemError } = milestoneIds.length
-    ? await supabase
-        .from("template_items")
-        .select(
-          "id, milestone_id, content_id, sequence, is_required, available_offset_days, due_offset_days, completion_rule, include_in_progress, is_active",
-        )
-        .in("milestone_id", milestoneIds)
-        .order("sequence")
-    : { data: [], error: null };
-  if (itemError) throw new Error("Không tải được hoạt động trong template.");
+  const itemList = itemsRes.recordset.map((i: any) => ({
+    id: String(i.id),
+    milestone_id: String(i.milestone_id),
+    content_id: String(i.content_id),
+    sequence: Number(i.sequence),
+    is_required: Boolean(i.is_required),
+    available_offset_days: i.available_offset_days !== null ? Number(i.available_offset_days) : null,
+    due_offset_days: i.due_offset_days !== null ? Number(i.due_offset_days) : null,
+    completion_rule: String(i.completion_rule),
+    include_in_progress: Boolean(i.include_in_progress),
+    is_active: Boolean(i.is_active),
+  }));
 
-  const { data: contentRows, error: contentError } = await supabase
-    .from("contents")
-    .select("id, title, content_type, status")
-    .order("title");
-  if (contentError) throw new Error("Không tải được danh mục nội dung.");
-  const publishedContents = (contentRows ?? []).filter(
-    (content) => content.status === "published",
-  );
-  const itemList = items ?? [];
-  const milestoneList = milestones ?? [];
+  const contentsRes = await pool.request().query(`
+    SELECT Id AS id, Title AS title, ContentType AS content_type, Status AS status
+    FROM app.Contents
+    WHERE Status = N'published'
+    ORDER BY Title ASC
+  `);
+
+  const publishedContents = contentsRes.recordset.map((c: any) => ({
+    id: String(c.id),
+    title: String(c.title),
+    content_type: String(c.content_type),
+    status: String(c.status),
+  }));
+
   const editable = template.status === "draft";
 
   return (
@@ -352,7 +424,7 @@ export async function TemplateDetailPage({
                       </label>
                       <label className="field">
                         <span>Mở sau ngày</span>
-                        <input defaultValue={item.available_offset_days} max="3650" min="0" name="available_offset_days" type="number" />
+                        <input defaultValue={item.available_offset_days ?? 0} max="3650" min="0" name="available_offset_days" type="number" />
                       </label>
                       <label className="field">
                         <span>Hạn sau ngày (để trống nếu không có)</span>
