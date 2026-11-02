@@ -77,7 +77,7 @@ export async function loginAction(
     await createSession(String(user.Id));
 
     const redirectUrl =
-      user.Role === "hr_admin" ? "/admin/dashboard" : "/roadmap";
+      user.Role === "hr_admin" ? "/admin/dashboard" : "/home";
 
     console.log(">> [SERVER ACTION SUCCESS] email:", email, "role:", user.Role, "redirectUrl:", redirectUrl);
 
@@ -206,7 +206,7 @@ export async function registerAction(
 
     return {
       success: true,
-      redirectUrl: "/roadmap",
+      redirectUrl: "/home",
     };
   } catch (err) {
     console.error("Lỗi đăng ký tài khoản:", err);
