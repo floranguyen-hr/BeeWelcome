@@ -66,7 +66,7 @@ export async function POST(request: Request) {
 
     // 3. Khởi tạo session token bảo mật
     const token = signSessionToken(String(user.Id));
-    const redirectUrl = user.Role === "hr_admin" ? "/admin/dashboard" : "/roadmap";
+    const redirectUrl = user.Role === "hr_admin" ? "/admin/dashboard" : "/home";
 
     const response = NextResponse.json({
       success: true,
