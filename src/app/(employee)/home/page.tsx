@@ -75,11 +75,11 @@ export default async function EmployeeHomePage() {
       status:String(row.status),
     }));
   }
-  const open = activities.filter(a=>a.available<=today && journey?.status==="active");
+  const open = activities.filter(a=>a.available<=today && journey?.status!=="cancelled");
   const eligible = open.filter(a=>a.included);
   const completed = eligible.filter(isDone).length;
   const overall = rate(eligible);
-  const next = open.find(a=>!isDone(a)) ?? null;
+  const next = journey?.status==="active" ? (open.find(a=>!isDone(a)) ?? null) : null;
   const groupMap = new Map<string,Activity[]>();
   for(const activity of open) {
     const current = groupMap.get(activity.group) ?? [];
